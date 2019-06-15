@@ -1,26 +1,28 @@
 /*
-* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*       http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*/
+ * Copyright 2016 The TensorFlow Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package pp.facerecognizer;
 
 import android.content.ClipData;
+import android.content.Context;
 import android.content.Intent;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
 import android.graphics.Bitmap.Config;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
@@ -33,11 +35,16 @@ import android.os.SystemClock;
 import android.speech.tts.TextToSpeech;
 import android.util.Log;
 import android.util.Size;
+import android.util.SparseArray;
 import android.util.TypedValue;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.Toast;
 
+import com.google.android.gms.vision.Frame;
+import com.google.android.gms.vision.face.Face;
+import com.google.android.gms.vision.face.FaceDetector;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.android.material.snackbar.Snackbar;
 
@@ -49,16 +56,18 @@ import java.util.Locale;
 import java.util.Vector;
 
 import androidx.appcompat.app.AlertDialog;
+
 import pp.facerecognizer.env.BorderedText;
 import pp.facerecognizer.env.FileUtils;
 import pp.facerecognizer.env.ImageUtils;
 import pp.facerecognizer.env.Logger;
 import pp.facerecognizer.tracking.MultiBoxTracker;
+import timber.log.Timber;
 
 /**
-* An activity that uses a TensorFlowMultiBoxDetector and ObjectTracker to detect and then track
-* objects.
-*/
+ * An activity that uses a TensorFlowMultiBoxDetector and ObjectTracker to detect and then track
+ * objects.
+ */
 public class MainActivity extends CameraActivity implements OnImageAvailableListener {
     private static final Logger LOGGER = new Logger();
 
@@ -69,6 +78,10 @@ public class MainActivity extends CameraActivity implements OnImageAvailableList
 
     private static final boolean SAVE_PREVIEW_BITMAP = false;
     private static final float TEXT_SIZE_DIP = 10;
+
+    private static final float EMOJI_SCALE_FACTOR = .9f;
+    private static final double SMILING_PROB_THRESHOLD = .15;
+    private static final double EYE_OPEN_PROB_THRESHOLD = .5;
 
     private Integer sensorOrientation;
 
@@ -99,12 +112,15 @@ public class MainActivity extends CameraActivity implements OnImageAvailableList
     private boolean initialized = false;
     private boolean training = false;
 
-    private  TextToSpeech textToSpeech;
+    private TextToSpeech textToSpeech;
+    private Context context;
+    private static String emoji;
 
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        context = getApplicationContext();
         FrameLayout container = findViewById(R.id.container);
         initSnackbar = Snackbar.make(container, "Initializing...", Snackbar.LENGTH_INDEFINITE);
         trainSnackbar = Snackbar.make(container, "Training data...", Snackbar.LENGTH_INDEFINITE);
@@ -140,8 +156,8 @@ public class MainActivity extends CameraActivity implements OnImageAvailableList
             new Thread(this::init).start();
 
         final float textSizePx =
-        TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_DIP, TEXT_SIZE_DIP, getResources().getDisplayMetrics());
+                TypedValue.applyDimension(
+                        TypedValue.COMPLEX_UNIT_DIP, TEXT_SIZE_DIP, getResources().getDisplayMetrics());
         borderedText = new BorderedText(textSizePx);
         borderedText.setTypeface(Typeface.MONOSPACE);
 
@@ -216,7 +232,7 @@ public class MainActivity extends CameraActivity implements OnImageAvailableList
     OverlayView trackingOverlay;
 
     void init() {
-        runOnUiThread(()-> initSnackbar.show());
+        runOnUiThread(() -> initSnackbar.show());
         File dir = new File(FileUtils.ROOT);
 
         if (!dir.isDirectory()) {
@@ -238,13 +254,14 @@ public class MainActivity extends CameraActivity implements OnImageAvailableList
 
                 }
             });
+            Log.e("ghofran", "init: " + emoji );
             classifier = Classifier.getInstance(getAssets(), FACE_SIZE, FACE_SIZE, textToSpeech);
         } catch (Exception e) {
             LOGGER.e("Exception initializing classifier!", e);
             finish();
         }
 
-        runOnUiThread(()-> initSnackbar.dismiss());
+        runOnUiThread(() -> initSnackbar.dismiss());
         initialized = true;
     }
 
@@ -291,8 +308,10 @@ public class MainActivity extends CameraActivity implements OnImageAvailableList
                     final long startTime = SystemClock.uptimeMillis();
 
                     cropCopyBitmap = Bitmap.createBitmap(croppedBitmap);
+                    emoji = expressionDetection(getApplicationContext(), cropCopyBitmap);
+                    Log.e("MainActivityyyyyy", "processImage: "+ emoji );
                     List<Classifier.Recognition> mappedRecognitions =
-                            classifier.recognizeImage(croppedBitmap,cropToFrameTransform);
+                            classifier.recognizeImage(croppedBitmap, cropToFrameTransform, emoji);
 
                     lastProcessingTimeMs = SystemClock.uptimeMillis() - startTime;
                     tracker.trackResults(mappedRecognitions, luminanceCopy, currTimestamp);
@@ -301,6 +320,113 @@ public class MainActivity extends CameraActivity implements OnImageAvailableList
                     requestRender();
                     computingDetection = false;
                 });
+    }
+
+    protected String expressionDetection(Context context, Bitmap resultBitmap) {
+
+        // Create the face detector, disable tracking and enable classifications
+        FaceDetector detector = new FaceDetector.Builder(context)
+                .setTrackingEnabled(false)
+                .setClassificationType(FaceDetector.ALL_CLASSIFICATIONS)
+                .build();
+
+        Frame frame = new Frame.Builder().setBitmap(resultBitmap).build();
+
+
+        // Detect the faces
+        SparseArray<Face> faces = detector.detect(frame);
+
+        // Log the number of faces
+        Timber.d("detectFaces: number of faces = " + faces.size());
+
+
+        // If there are no faces detected, show a Toast message
+        if (faces.size() == 0) {
+            Toast.makeText(context, R.string.no_faces_message, Toast.LENGTH_SHORT).show();
+        } else {
+
+            // Iterate through the faces
+            for (int i = 0; i < faces.size(); ++i) {
+                Face face = faces.valueAt(i);
+                switch (whichEmoji(face)) {
+                    case SMILE:
+                        return  "smile";
+
+                    case FROWN:
+                        return "frown";
+
+                    case LEFT_WINK:
+                        return "leftwink";
+
+                    case RIGHT_WINK:
+                        return "rightwink";
+
+                    case LEFT_WINK_FROWN:
+                        return "leftwinkfrown";
+
+                    case RIGHT_WINK_FROWN:
+                        return "rightwinkfrown";
+
+                    case CLOSED_EYE_SMILE:
+                        return "closed_smile";
+
+                    case CLOSED_EYE_FROWN:
+                        return "closed_frown";
+                    default:
+                        return "";
+                }
+
+            }
+        }
+        return "";
+    }
+
+    private static Emojifier.Emoji whichEmoji(Face face) {
+        // Log all the probabilities
+        Timber.d("whichEmoji: smilingProb = " + face.getIsSmilingProbability());
+        Timber.d("whichEmoji: leftEyeOpenProb = "
+                + face.getIsLeftEyeOpenProbability());
+        Timber.d("whichEmoji: rightEyeOpenProb = "
+                + face.getIsRightEyeOpenProbability());
+
+
+        boolean smiling = face.getIsSmilingProbability() > SMILING_PROB_THRESHOLD;
+
+        boolean leftEyeClosed = face.getIsLeftEyeOpenProbability() < EYE_OPEN_PROB_THRESHOLD;
+        boolean rightEyeClosed = face.getIsRightEyeOpenProbability() < EYE_OPEN_PROB_THRESHOLD;
+
+
+        // Determine and log the appropriate emoji
+        Emojifier.Emoji emoji;
+        if (smiling) {
+            if (leftEyeClosed && !rightEyeClosed) {
+                emoji = Emojifier.Emoji.LEFT_WINK;
+            } else if (rightEyeClosed && !leftEyeClosed) {
+                emoji = Emojifier.Emoji.RIGHT_WINK;
+            } else if (leftEyeClosed) {
+                emoji = Emojifier.Emoji.CLOSED_EYE_SMILE;
+            } else {
+                emoji = Emojifier.Emoji.SMILE;
+            }
+        } else {
+            if (leftEyeClosed && !rightEyeClosed) {
+                emoji = Emojifier.Emoji.LEFT_WINK_FROWN;
+            } else if (rightEyeClosed && !leftEyeClosed) {
+                emoji = Emojifier.Emoji.RIGHT_WINK_FROWN;
+            } else if (leftEyeClosed) {
+                emoji = Emojifier.Emoji.CLOSED_EYE_FROWN;
+            } else {
+                emoji = Emojifier.Emoji.FROWN;
+            }
+        }
+
+
+        // Log the chosen Emoji
+        Timber.d("whichEmoji: " + emoji.name());
+
+        // return the chosen Emoji
+        Log.e("MainActivity", "whichEmoji: "+ emoji.toString() );
+        return emoji;
     }
 
     @Override

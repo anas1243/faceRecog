@@ -43,6 +43,8 @@ import pp.facerecognizer.wrapper.FaceNet;
 import pp.facerecognizer.wrapper.LibSVM;
 import pp.facerecognizer.wrapper.MTCNN;
 
+import static android.content.ContentValues.TAG;
+
 /**
  * Generic interface for interacting with different recognition engines.
  */
@@ -130,7 +132,6 @@ public class Classifier {
     private FaceNet faceNet;
     private LibSVM svm;
     private static TextToSpeech mtextToSpeech;
-    private static Context mContext;
 
     private List<String> classNames;
 
@@ -167,7 +168,7 @@ public class Classifier {
         return cs;
     }
 
-    List<Recognition> recognizeImage(Bitmap bitmap, Matrix matrix) {
+    List<Recognition> recognizeImage(Bitmap bitmap, Matrix matrix, String emoji) {
         synchronized (this) {
             Pair faces[] = mtcnn.detect(bitmap);
 
@@ -188,7 +189,7 @@ public class Classifier {
                 String name;
 
                 if (prob > 0.5) {
-                    name = classNames.get(pair.first);
+                    name = classNames.get(pair.first) + " "+ emoji;
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                         Log.e("TTS", " success. "+ name);
